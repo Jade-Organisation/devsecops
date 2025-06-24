@@ -1,0 +1,17 @@
+name: Semgrep scan
+
+on: [push]
+
+permissions:
+  contents: read          # To checkout and code read
+  actions: read           # To read execution Github Actions context
+  security-events: write  # To upload SARIF files into GHAS 
+
+jobs:
+  reusable_semgrep_workflow:
+    name: SAST scan in pre-prod
+    uses: ./.github/workflows/semgrep.yml
+    with:
+      working-directory: '.'
+      is-blocking: false
+      env: pre-prod

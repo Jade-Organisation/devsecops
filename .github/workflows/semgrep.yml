@@ -1,0 +1,284 @@
+name: ci/cd security - semgrep
+
+# Permissions required for the workflow to interact with GHA and GHAS features
+permissions:
+  contents: read          # Allows reading the repository contents
+  actions: read           # Allows reading GA workflow context
+  security-events: write  # Allows uploding SARIF reports to GHAS
+
+on: 
+  workflow_call:          # Allows workflow to be triggered by another workflow
+    
+    inputs:
+      env:                # Describe the environment where the worklow is executed
+        required: false
+        type: string
+      working-directory:  # Root directory for scans
+        required: false
+        default: '.'
+        type: string
+      python-version:    # Python version to use for the scan tools
+        required: false
+        default: '3.11'
+        type: string
+      semgrep-config:    # Semgrep ruleset to use
+        required: false
+        default: 'auto'
+        type: string
+      severity-threshold-config: # Minimum severity level to report
+        required: false
+        default: 'low'
+        type: string
+      severity-threshold-blocking: # Workflow fails if issues of this level of severity are found
+        required: false
+        default: 'none'
+        type: string
+
+jobs:
+  
+#Job1 : Run Semgrep for SAST
+  scan:
+    name: SAST scan with semgrep
+    timeout-minutes: 60
+    runs-on: self-hosted
+    env:
+      ENV: ${{ inputs.env }}
+      WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+      SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
+      SEVERITY_THRESHOLD_CONFIG: ${{ inputs.severity-threshold-config }}
+      SEVERITY_THRESHOLD_BLOCKING: ${{ inputs.severity-threshold-blocking }}
+    steps:
+
+      - name: Check values, adapt values for command and show workflow inputs
+        id: change-inputs-values
+        continue-on-error: false
+        run: |
+          # Check if the working directory specified exist
+          if [ ! -d "$WORKING_DIRECTORY" ]; then
+            echo "Working directory $WORKING_DIRECTORY does not exist"
+            exit 1
+          else
+            echo "Working directory  is valid"
+          fi
+
+          # Transform string into lower caractere
+          LOWER_SEVERITY_THRESHOLD_CONFIG=$(echo "$SEVERITY_THRESHOLD_CONFIG" | tr '[:upper:]' '[:lower:]')
+          
+          # Change SEVERITY_THRESHOLD_CONFIG for semgrep command
+
+          if [ $LOWER_SEVERITY_THRESHOLD_CONFIG == 'low' ]; then 
+            echo "severity_threshold_config=INFO" >> "$GITHUB_OUTPUT"
+          elif [ $LOWER_SEVERITY_THRESHOLD_CONFIG == 'medium' ]; then 
+            echo "severity_threshold_config=ERROR" >> "$GITHUB_OUTPUT"
+          elif [ $LOWER_SEVERITY_THRESHOLD_CONFIG == 'high' ]; then
+            echo "severity_threshold_config=WARNING" >> "$GITHUB_OUTPUT"
+          elif [ $LOWER_SEVERITY_THRESHOLD_CONFIG == 'all' ]; then
+            echo "severity_threshold_config=ALL" >> "$GITHUB_OUTPUT"        
+          else
+            echo "$SEVERITY_THRESHOLD_CONFIG is not valid choose btw low, medium, high, all"
+            exit 1
+          fi
+
+          echo "severity_threshold_config, "$SEVERITY_THRESHOLD_CONFIG", is valid"
+          
+          LOWER_SEVERITY_THRESHOLD_BLOCKING=$(echo "$SEVERITY_THRESHOLD_BLOCKING" | tr '[:upper:]' '[:lower:]')
+
+          # Change SEVERITY_THRESHOLD_BLOKING for semgrep command
+
+          if [ "$LOWER_SEVERITY_THRESHOLD_BLOCKING" == 'low' ]; then
+            echo "severity_threshold_blocking=INFO" >> "$GITHUB_OUTPUT"
+          elif [ "$LOWER_SEVERITY_THRESHOLD_BLOCKING" == 'medium' ]; then 
+            echo "severity_threshold_blocking=WARNING" >> "$GITHUB_OUTPUT"
+          elif [ "$LOWER_SEVERITY_THRESHOLD_BLOCKING" == 'high' ]; then
+            echo "severity_threshold_blocking=ERROR" >> "$GITHUB_OUTPUT"
+          elif [ "$LOWER_SEVERITY_THRESHOLD_BLOCKING" == 'none' ]; then
+            echo "severity_threshold_blocking=-" >> "$GITHUB_OUTPUT"
+          else
+            echo "$SEVERITY_THRESHOLD_BLOCKING is not valid choose btw low, medium, high, none"
+            exit 1
+          fi
+
+          echo "severity_threshold_blocking "$SEVERITY_THRESHOLD_BLOCKING" is valid"
+
+
+      # Checkout the repository code to the runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      
+      - name: Install Semgrep
+        run: |
+          python -m pip install --upgrade pip
+          pip install semgrep
+          echo "Semgrep version : "
+          semgrep --version
+        
+      - name: Create log directory
+        run: |
+          if [ ! -d "$WORKING_DIRECTORY/log" ]; then
+            echo "Installing log directory in $WORKING_DIRECTORY"
+            mkdir -p "$WORKING_DIRECTORY/log"
+          fi
+
+          if [ -d "$WORKING_DIRECTORY/log" ]; then
+            echo "log directory exist at $WORKING_DIRECTORY/log"
+            ls -a $WORKING_DIRECTORY
+          fi
+
+      # Run semgrep with property adapt to ci workflow and generate a SARIF report
+      - name: Run Semgrep and generate SARIF
+        env:
+          SEMGREP_SEVERITY_THRESHOLD_CONFIG: ${{ steps.change-inputs-values.outputs.severity_threshold_config }}
+        # Create semgrep command and add severity level if necessary
+        run: |
+          echo "Starting Semgrep security scan..."
+          
+          # Sarif file
+          SEMGREP_CMD=(
+          semgrep scan $WORKING_DIRECTORY \
+          --config "$SEMGREP_CONFIG" \
+          --sarif \
+          --sarif-output="$WORKING_DIRECTORY/log/semgrep.sarif" \
+          --verbose
+          )
+
+          if [ "$SEMGREP_SEVERITY_THRESHOLD_CONFIG" != "ALL" ]; then
+            SEMGREP_CMD+=(--severity "$SEMGREP_SEVERITY_THRESHOLD_CONFIG")
+          fi
+
+          echo "Running semgrep command : ${SEMGREP_CMD[*]}"
+          "${SEMGREP_CMD[@]}"
+
+          # Json file
+          SEMGREP_CMD=(
+          semgrep scan $WORKING_DIRECTORY \
+          --config "$SEMGREP_CONFIG" \
+          --json \
+          --json-output="$WORKING_DIRECTORY/log/semgrep.json" \
+          --verbose
+          )
+
+          if [ "$SEMGREP_SEVERITY_THRESHOLD_CONFIG" != "ALL" ]; then
+            SEMGREP_CMD+=(--severity "$SEMGREP_SEVERITY_THRESHOLD_CONFIG")
+          fi
+
+          echo "Running semgrep command : ${SEMGREP_CMD[*]}"
+          "${SEMGREP_CMD[@]}"
+
+      - name: Check sarif then json file created
+        id: file-generation
+        run: |
+          ls $WORKING_DIRECTORY/log
+          if [ -f "$WORKING_DIRECTORY/log/semgrep.sarif" ]; then
+            echo "semgrep.sarif generated"
+            echo "semgrep-sarif-generated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "semgrep.sarif generation failed"
+            echo "semgrep-sarif-generated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -f "$WORKING_DIRECTORY/log/semgrep.json" ]; then
+            echo "semgrep.sarif generated"
+            echo "semgrep-json-generated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "semgrep.json generation failed"
+            echo "semgrep-json-generated=false" >> "$GITHUB_OUTPUT"
+          fi
+      
+      # Upload SARIF report into GHAS
+      - name: Upload SARIF to Github Advanced Security
+        if: steps.file-generation.outputs.semgrep-sarif-generated == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with: 
+          sarif_file: "${{ env.WORKING_DIRECTORY }}/log/semgrep.sarif"
+          category: semgrep-security  
+
+      # Upload SARIF file for review/debugging (kept for 30 days)
+      - name: Upload SARIF as artifact (for debugging)
+        # Always run this step even if previous one fail
+        if: always() && steps.file-generation.outputs.semgrep-json-generated == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep
+          path: "${{ env.WORKING_DIRECTORY }}/log/semgrep.sarif"
+          retention-days: 30
+      
+      - name: Generate scan report and block if the level of security is higher than the one choosen
+        continue-on-error: false
+        env: 
+          SEMGREP_THRESHOLD_BLOCKING: ${{ steps.change-inputs-values.outputs.severity_threshold_blocking }}
+        run: |
+          echo "Generating scan report"
+          if [ -f "log/semgrep.json" ]; then
+            python3 <<EOF
+
+          import json
+          import os
+          import sys
+          from collections import defaultdict
+
+          try: 
+          # Load report
+            with open('log/semgrep.json', 'r') as sarif_file:
+              data = json.load(sarif_file)
+          
+            results = data.get('results', [])
+            errors = data.get('errors', [])
+
+            print("Scan report :")
+            print(f"Total findings : {len(results)}")
+
+          # Count and order severities
+            if results:
+              
+              severity_counts = defaultdict(int)
+              
+              for result in results:
+                severity = result.get('extra',{}).get('severity', 'unknown')
+                severity_counts[severity] += 1
+            
+            # Show number of severity type
+
+
+              for severity, count in sorted(severity_counts.items()):
+                print(f"{severity.title()} : {count}")
+
+            # Compare the severity levels found with the blocking severity 
+              
+              # Function to compare per level of severity
+              def is_severity_above_threshold(severity_counts, threshold, order):
+                threshold_index = order.index(threshold.upper())
+                for severity, count in severity_counts.items():
+
+                  if count > 0 and order.index(severity.upper()) >= threshold_index:
+                    return True # Found blocking severity
+                return False
+              
+              max_threshold_allowed = os.getenv('SEMGREP_THRESHOLD_BLOCKING')
+
+              severity_order = ['INFO', 'WARNING', 'ERROR']
+              
+              if is_severity_above_threshold(severity_counts, max_threshold_allowed, severity_order):
+                print("Found blocking severities")
+                sys.exit(1)
+              else:
+                print("Found only acceptable severities")
+
+            else:
+              print("No severity found")
+          
+          except Exception as e: 
+            print("Error generating report")
+            
+          EOF
+          
+          else 
+            echo "WARNING : No report found"
+          fi 
+
