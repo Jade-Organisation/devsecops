@@ -1,4 +1,4 @@
-name: Semgrep scan
+name: Security scan
 
 on: [push]
 
@@ -13,5 +13,12 @@ jobs:
     uses: ./.github/workflows/semgrep.yml
     with:
       working-directory: '.'
-      is-blocking: false
       env: pre-prod
+      severity-threshold-config: 'all'
+      severity-threshold-blocking: 'high'
+  reusable_security_workflow:
+    name: Several security checks
+    uses: ./.github/workflows/security_scan.yml
+    with:
+      working-directory: '.'
+      
