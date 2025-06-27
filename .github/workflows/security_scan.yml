@@ -1,0 +1,199 @@
+name: security scan - Bandit and pip-audit
+
+# Permissions required for the workflow to interact with GHA and GHAS features
+permissions:
+  contents: read            # Allows reading the repository contents
+  actions: read             # Allows reading GA workflow context
+  security-events: write    # Allows uploding SARIF reports to GHAS
+
+on:
+  workflow_call:            # Allows workflow to be triggered by another workflow
+    
+    inputs: 
+      working-directory:    # Root directory for scans
+        required: false
+        default: '.'
+        type: string
+      python-version:       # Python version to use for the scan tools
+        required: false
+        default: '3.11'
+        type: string
+      use-bandit:           # Enable or disable BANDIT
+        required: false
+        default: true
+        type: boolean
+      use-pip-audit:        # Enable or disable pip-audit
+        required: false
+        default: true
+        type: boolean
+      requirements:         # Path to the requirements file for pip-audit
+        required: false
+        default: 'requirements.txt'
+        type: string
+
+jobs:
+
+# Job1 : Display information about inputs
+  workflow-information:
+    name: Information about the workflow
+    continue-on-error: true # Do not fail the workflow if this job fails
+    timeout-minutes: 2
+    runs-on: self-hosted
+    env:                    # Inject all inputs into env variables for safer shell access
+      WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+      BANDIT: ${{inputs.use-bandit}}
+      PI_AUDIT: ${{inputs.use-pi-audit}}
+    steps:
+
+      - name: Working directory and python information
+        run: |
+          echo "working directory : \"$WORKING_DIRECTORY\""
+          echo "python version : \"$PYTHON_VERSION\""
+
+      - name : tools used information
+        run: |
+          echo "bandit : \"$BANDIT\""
+          echo "pi-audit : \"$PI_AUDIT\""
+
+# Job2 : Prepare log directory
+  initialisation:
+    name: initialisation
+    continue-on-error: true
+    timeout-minutes : 20
+    runs-on: self-hosted
+    env:
+      WORKING_DIRECTORY: ${{ inputs.working-directory }}
+    steps:
+
+      - name: Create log directory
+        run: |
+          if [ ! -d "$WORKING_DIRECTORY/log" ]; then
+            echo "Installing log directory in $WORKING_DIRECTORY"
+            mkdir -p "$WORKING_DIRECTORY/log"
+          fi
+
+          if [ -d "$WORKING_DIRECTORY/log" ]; then
+            echo "log directory exist at $WORKING_DIRECTORY/log"
+            ls -a $WORKING_DIRECTORY
+          fi
+
+#Job3 : Run Bandit for static analysis
+  scan-bandit:
+    name: SAST scan with bandit
+    continue-on-error: true
+    if : ${{ inputs.use-bandit }} # Run if Bandit is enabled
+    timeout-minutes : 20
+    runs-on: self-hosted
+    env:                          # env variables to simplify lisibility              
+      WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+    steps:
+
+      # Checkout the repository code to the runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install bandit with sarif option
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit[sarif]
+          bandit --version
+      
+      - name: Run Bandit and generate sarif and json file
+        continue-on-error: true
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run: |
+          bandit -r ./ \
+          -f sarif \
+          -o log/bandit.sarif
+
+          bandit -r ./ \
+          -f json \
+          -o log/bandit.json
+      
+      - name: Check json and sarif file generation
+        id: file-generation
+        continue-on-error: true
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        run : |
+          if [ -f ./log/bandit.sarif ]; then
+            echo "sarif file generated"
+            echo "bandit-sarif-generated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sarif file generation failed"
+          fi
+          if [ -f ./log/bandit.json ]; then
+            echo "json file generated"
+            echo "bandit-json-generated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "json file generation failed"
+          fi
+
+      # Upload SARIF report into GHAS
+      - name: Upload SARIF to Github Advanced Security
+        if: steps.file-generation.outputs.bandit-sarif-generated == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with: 
+          sarif_file: "${{ env.WORKING_DIRECTORY }}/log/bandit.sarif"
+          category: bandit-security  
+
+      # Upload SARIF file for review/debugging (kept for 30 days)
+      - name: Upload SARIF as artifact (for debugging)
+        # Always run this step even if previous one fail
+        if: always() && steps.file-generation.outputs.semgrep-json-generated == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep
+          path: "${{ env.WORKING_DIRECTORY }}/log/semgrep.sarif"
+          retention-days: 30
+      
+
+
+#Job4 : Run pip-audit to scan dependances (don't have sarif extension)
+  dep-scan-pip-audit:
+    name: Dependance scan with pip-audit
+    continue-on-error: true
+    if : ${{ inputs.use-pip-audit }}
+    timeout-minutes: 20
+    runs-on: self-hosted
+    env:
+      REQUIREMENTS: ${{ inputs.requirements }}
+      PYTHON_VERSION: ${{ inputs.python-version }}
+    steps:
+
+      # Checkout the repository code to the runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+          pip-audit --version
+
+      - name: Run pip-audit and generate json
+        run: |
+          pip-audit \
+          --requirement ${{ env.REQUIREMENTS }} \
+          --format=json \
+          --output=log/pip-audit.json
+
+   
+    
+
+
+
+
